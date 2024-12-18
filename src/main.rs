@@ -1,97 +1,134 @@
-use std::{io, vec};
+mod ui;
+mod app;
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
-use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    style::Stylize,
-    symbols::border,
-    text::{Line, Text},
-    widgets::{Block, Paragraph, Widget},
-    DefaultTerminal, Frame,
-};
+use app::{App, CurrentScreen, CurrentlyEditing};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use ratatui::crossterm::event::EnableMouseCapture;
+use ratatui::crossterm::execute;
+use ratatui::crossterm::terminal::{enable_raw_mode, EnterAlternateScreen};
+use ratatui::prelude::{Backend, CrosstermBackend};
+use ratatui::Terminal;
+use std::{error::Error, io};
+use ratatui::crossterm::event::DisableMouseCapture;
+use ratatui::crossterm::terminal::{disable_raw_mode, LeaveAlternateScreen};
+use crate::ui::ui;
 
-#[derive(Debug, Default)]
-pub struct App {
-    counter: u8,
-    exit: bool,
-}
 
-impl App {
-    // runs app's main loop until user terminates
-
-    pub fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
-        while !self.exit {
-            terminal.draw(|frame| self.draw(frame))?;
-            self.handle_events()?;
-        }
-        Ok(())
-    }
-
-    fn draw(&self, frame: &mut Frame) {
-        frame.render_widget(self, frame.area());
-    }
-    fn handle_events(&mut self) -> io::Result<()> {
-        match event::read()? {
-            Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
-                self.handle_key_event(key_event)
+fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Result<bool> {
+    loop {
+        terminal.draw(|f| ui(f, app))?;
+        if let Event::Key(key) = event::read()? {
+            if key.kind == event::KeyEventKind::Release {
+                continue;
             }
-            _ => {}
-        };
-        Ok(())
-    }
-    fn handle_key_event(&mut self, key_event: KeyEvent) {
-        match key_event.code {
-            KeyCode::Char('q') => self.exit(),
-            KeyCode::Left => self.decrement_counter(),
-            KeyCode::Right => self.increment_counter(),
-            _ => {}
+
+            match app.current_screen {
+                CurrentScreen::Main => match key.code {
+                    KeyCode::Char('e') => {
+                        app.current_screen = CurrentScreen::Editing;
+                        app.currently_editing = Some(CurrentlyEditing::Key);
+                    }
+                    KeyCode::Char('q') => {
+                        app.current_screen = CurrentScreen::Exiting;
+                    }
+                    _ => {}
+                },
+                CurrentScreen::Exiting => match key.code {
+                    KeyCode::Char('y') => {
+                        return Ok(true);
+                    }
+                    KeyCode::Char('n') | KeyCode::Char('q') => {
+                        return Ok(false);
+                    }
+                    _ => {}
+                },
+                CurrentScreen::Editing if key.kind == KeyEventKind::Press => {
+                    match key.code {
+                        KeyCode::Enter => {
+                            if let Some(editing) = &app.currently_editing {
+                                match editing {
+                                    CurrentlyEditing::Key => {
+                                        app.currently_editing = Some(CurrentlyEditing::Value);
+                                    }
+                                    CurrentlyEditing::Value => {
+                                        app.save_key_value();
+                                        app.current_screen = CurrentScreen::Main;
+                                    }
+                                }
+                            }
+                        }
+                        KeyCode::Backspace => {
+                            if let Some(editing) = &app.currently_editing {
+                                match editing {
+                                    CurrentlyEditing::Key => {
+                                        app.key_input.pop();
+                                    }
+                                    CurrentlyEditing::Value => {
+                                        app.value_input.pop();
+                                    }
+                                }
+                            }
+                        }
+                        KeyCode::Esc => {
+                            app.current_screen = CurrentScreen::Main;
+                            app.currently_editing = None;
+                        }
+                        KeyCode::Tab => {
+                            app.toggle_editing();
+                        }
+                        KeyCode::Char(value) => {
+                            if let Some(editing) = &app.currently_editing {
+                                match editing {
+                                    CurrentlyEditing::Key => {
+                                        app.key_input.push(value);
+                                    }
+                                    CurrentlyEditing::Value => {
+                                        app.value_input.push(value);
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
         }
     }
-    fn exit(&mut self) {
-        self.exit = true;
+}
+fn main() -> Result<(), Box<dyn Error>> {
+    // Setup terminal
+    enable_raw_mode()?;
+    let mut stderr = io::stderr();
+    execute!(stderr, EnterAlternateScreen, EnableMouseCapture)?;
+
+    let backend = CrosstermBackend::new(stderr);
+    let mut terminal = Terminal::new(backend)?;
+
+    // create app and run it
+    let mut app = App::new();
+    let res = run_app(&mut terminal, &mut app);
+
+    // restore terminal to undo the above boiletplate
+    disable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
+    terminal.show_cursor()?;
+
+    if let Ok(do_print) = res {
+        if do_print {
+            app.print_json();
+        } 
+    } else if let Err(err) = res {
+        println!("{err:?}");
     }
-    fn increment_counter(&mut self) {
-        self.counter += 1;
-    }
-    fn decrement_counter(&mut self) {
-        self.counter -=1;
-    }
+
+    Ok(())
 }
 
-impl Widget for &App {
-    fn render(self, area: Rect, buf: &mut Buffer) {
-        let title = Line::from(" Counter App ".bold());
-        let instructions = Line::from(vec![
-            " Decrement ".into(),
-            "<Left>".blue().bold(),
-            " Increment ".into(),
-            "<Right>".blue().bold(),
-            " Quit ".into(),
-            "<Q>".blue().bold(),
-        ]);
-        let block = Block::bordered()
-        .title(title.centered())
-        .title_bottom(instructions.centered())
-        .border_set(border::THICK);
-        let counter_text = Text::from(vec![Line::from(vec![
-            "Value: ".into(),
-            self.counter.to_string().yellow(),
-        ])]);
-        Paragraph::new(counter_text)
-        .centered()
-        .block(block)
-        .render(area, buf);
-    }
-}
-
-fn main() -> io::Result<()> {
-    let mut terminal = ratatui::init();
-    terminal.clear()?;
-    let app_result = App::default().run(&mut terminal);
-    ratatui::restore();
-    app_result
-}
 
 
 
